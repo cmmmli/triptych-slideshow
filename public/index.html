@@ -31,6 +31,10 @@
   }
   .btn.secondary { background: #333; }
   .hint { font-size: 13px; }
+  .link {
+    padding: 0 2px; border: none; background: none; cursor: pointer;
+    color: #8ab4ff; font: inherit; text-decoration: underline;
+  }
 
   #stage { position: fixed; inset: 0; display: flex; }
   #stage.gap { gap: 4px; }
@@ -77,9 +81,13 @@
   <h1>Triptych Slideshow</h1>
   <p>画像フォルダをここにドロップするか、選択してください</p>
   <div class="buttons">
+    <button type="button" class="btn" id="lastButton" hidden>前回のフォルダ「<span id="lastName"></span>」を開く</button>
     <button type="button" class="btn" id="dirButton">フォルダを選択</button>
     <button type="button" class="btn secondary" id="fileButton">ファイルを選択</button>
   </div>
+  <p class="hint" id="legacyHint" hidden>
+    開けないフォルダ（/Applications の中など）は<button type="button" class="link" id="legacyButton">従来の方法で選択</button>（前回のフォルダは覚えません）
+  </p>
   <input type="file" id="dirInput" webkitdirectory multiple hidden>
   <input type="file" id="fileInput" accept="image/*" multiple hidden>
   <p class="hint"><kbd>H</kbd> でキー操作一覧</p>
@@ -137,31 +145,121 @@ let busy = false;
 
 // ---------- 画像の読み込み ----------
 
+// list: { file: File, name: 表示用のパス }[]
 function setFiles(list) {
+  const images = list.filter(({ file }) => file.type.startsWith('image/') || IMG_RE.test(file.name));
+  if (!images.length) { toast('画像が見つかりませんでした'); return false; }
   for (const f of files) URL.revokeObjectURL(f.url);
-  files = list
-    .filter((f) => f.type.startsWith('image/') || IMG_RE.test(f.name))
-    .map((f) => ({ name: f.webkitRelativePath || f.name, url: URL.createObjectURL(f) }));
-  if (!files.length) { toast('画像が見つかりませんでした'); return; }
+  files = images.map(({ file, name }) => ({ name, url: URL.createObjectURL(file) }));
   bag = [];
   seqSlot = 0;
   $('start').classList.add('hidden');
   rebuild([]);
   toast(`${files.length} 枚の画像を読み込みました`);
+  return true;
 }
 
-$('dirButton').addEventListener('click', () => $('dirInput').click());
+// ---------- 前回のフォルダ（File System Access API、Chrome / Edge のみ） ----------
+
+const supportsHandles = 'showDirectoryPicker' in window;
+let lastDir = null;
+
+// フォルダのハンドルは localStorage に入らないので IndexedDB に保存する
+function idb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('triptych', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('kv');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction('kv', mode);
+      const req = fn(tx.objectStore('kv'));
+      tx.oncomplete = () => { db.close(); resolve(req.result); };
+      tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+function showLastDir(dir) {
+  lastDir = dir;
+  $('lastName').textContent = dir.name;
+  $('lastButton').hidden = false;
+  $('dirButton').classList.add('secondary');
+}
+
+async function readDirHandle(dir, prefix, out) {
+  for await (const h of dir.values()) {
+    if (h.name.startsWith('.')) continue;
+    const path = `${prefix}/${h.name}`;
+    if (h.kind === 'directory') await readDirHandle(h, path, out);
+    else if (IMG_RE.test(h.name)) out.push({ file: await h.getFile(), name: path });
+  }
+}
+
+// 読み込めなかったら false（ドロップ時は従来の方法にフォールバックする）
+async function openDirHandle(dir, { quiet = false } = {}) {
+  const out = [];
+  try {
+    await readDirHandle(dir, dir.name, out);
+  } catch {
+    if (!quiet) toast('フォルダを読み込めませんでした（移動・削除された可能性があります）');
+    return false;
+  }
+  if (!setFiles(out)) return true;
+  showLastDir(dir);
+  idb('readwrite', (s) => s.put(dir, 'lastDir')).catch(() => {});
+  return true;
+}
+
+async function openFolder() {
+  if (!supportsHandles) { $('dirInput').click(); return; }
+  let dir;
+  try {
+    dir = await window.showDirectoryPicker({ id: 'triptych', mode: 'read' });
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('フォルダを開けませんでした');
+    return;
+  }
+  await openDirHandle(dir);
+}
+
+async function openLastDir() {
+  if (!lastDir) return;
+  // 許可はページを開き直すと切れることが多いので、クリック（ユーザー操作）の中で取り直す
+  let perm;
+  try {
+    perm = await lastDir.queryPermission({ mode: 'read' });
+    if (perm !== 'granted') perm = await lastDir.requestPermission({ mode: 'read' });
+  } catch {
+    toast('前回のフォルダを開けませんでした');
+    return;
+  }
+  if (perm !== 'granted') { toast('フォルダへのアクセスが許可されませんでした'); return; }
+  await openDirHandle(lastDir);
+}
+
+if (supportsHandles) {
+  idb('readonly', (s) => s.get('lastDir')).then((dir) => dir && showLastDir(dir)).catch(() => {});
+  // showDirectoryPicker は /Applications や ~/Library などシステム扱いの場所を開けないので、従来の方法も残す
+  $('legacyHint').hidden = false;
+}
+
+$('legacyButton').addEventListener('click', () => $('dirInput').click());
+
+$('lastButton').addEventListener('click', openLastDir);
+$('dirButton').addEventListener('click', openFolder);
 $('fileButton').addEventListener('click', () => $('fileInput').click());
 for (const id of ['dirInput', 'fileInput']) {
   $(id).addEventListener('change', (e) => {
-    setFiles([...e.target.files]);
+    setFiles([...e.target.files].map((file) => ({ file, name: file.webkitRelativePath || file.name })));
     e.target.value = ''; // 同じフォルダを選び直しても change が発火するように
   });
 }
 
 async function readEntry(entry, out) {
   if (entry.isFile) {
-    out.push(await new Promise((res, rej) => entry.file(res, rej)));
+    const file = await new Promise((res, rej) => entry.file(res, rej));
+    out.push({ file, name: entry.fullPath.replace(/^\//, '') });
   } else if (entry.isDirectory) {
     const reader = entry.createReader();
     for (;;) {
@@ -177,12 +275,22 @@ document.addEventListener('dragleave', () => $('start').classList.remove('drag')
 document.addEventListener('drop', async (e) => {
   e.preventDefault();
   $('start').classList.remove('drag');
-  const entries = [...e.dataTransfer.items].map((it) => it.webkitGetAsEntry?.()).filter(Boolean);
+  // DataTransfer の中身は drop イベント中に同期的に取り出さないと、await の後では空になる
+  const items = [...e.dataTransfer.items].filter((it) => it.kind === 'file');
+  const handles = items.map((it) => it.getAsFileSystemHandle?.());
+  const entries = items.map((it) => it.webkitGetAsEntry?.()).filter(Boolean);
+  const dropped = [...e.dataTransfer.files];
+
+  // フォルダを1つだけドロップした場合は、ハンドルとして開いて「前回のフォルダ」にする
+  if (handles.length === 1 && handles[0]) {
+    const h = await handles[0].catch(() => null);
+    if (h?.kind === 'directory' && (await openDirHandle(h, { quiet: true }))) return;
+  }
   const out = [];
   if (entries.length) {
     for (const entry of entries) await readEntry(entry, out);
   } else {
-    out.push(...e.dataTransfer.files);
+    out.push(...dropped.map((file) => ({ file, name: file.name })));
   }
   setFiles(out);
 });
@@ -462,7 +570,7 @@ document.addEventListener('keydown', (e) => {
       if (document.fullscreenElement) document.exitFullscreen();
       else document.documentElement.requestFullscreen?.();
       break;
-    case 'o': case 'O': $('dirInput').click(); break;
+    case 'o': case 'O': openFolder(); break;
     case 'h': case 'H': case '?': help.classList.toggle('show'); break;
     case 'Escape':
       // フルスクリーン中の Esc はブラウザが解除に使うので、ここには届かない
