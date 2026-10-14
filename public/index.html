@@ -31,6 +31,10 @@
   }
   .btn.secondary { background: #333; }
   .hint { font-size: 13px; }
+  .link {
+    padding: 0 2px; border: none; background: none; cursor: pointer;
+    color: #8ab4ff; font: inherit; text-decoration: underline;
+  }
 
   #stage { position: fixed; inset: 0; display: flex; }
   #stage.gap { gap: 4px; }
@@ -81,6 +85,9 @@
     <button type="button" class="btn" id="dirButton">フォルダを選択</button>
     <button type="button" class="btn secondary" id="fileButton">ファイルを選択</button>
   </div>
+  <p class="hint" id="legacyHint" hidden>
+    開けないフォルダ（/Applications の中など）は<button type="button" class="link" id="legacyButton">従来の方法で選択</button>（前回のフォルダは覚えません）
+  </p>
   <input type="file" id="dirInput" webkitdirectory multiple hidden>
   <input type="file" id="fileInput" accept="image/*" multiple hidden>
   <p class="hint"><kbd>H</kbd> でキー操作一覧</p>
@@ -189,17 +196,19 @@ async function readDirHandle(dir, prefix, out) {
   }
 }
 
-async function openDirHandle(dir) {
+// 読み込めなかったら false（ドロップ時は従来の方法にフォールバックする）
+async function openDirHandle(dir, { quiet = false } = {}) {
   const out = [];
   try {
     await readDirHandle(dir, dir.name, out);
   } catch {
-    toast('フォルダを読み込めませんでした（移動・削除された可能性があります）');
-    return;
+    if (!quiet) toast('フォルダを読み込めませんでした（移動・削除された可能性があります）');
+    return false;
   }
-  if (!setFiles(out)) return;
+  if (!setFiles(out)) return true;
   showLastDir(dir);
   idb('readwrite', (s) => s.put(dir, 'lastDir')).catch(() => {});
+  return true;
 }
 
 async function openFolder() {
@@ -231,7 +240,11 @@ async function openLastDir() {
 
 if (supportsHandles) {
   idb('readonly', (s) => s.get('lastDir')).then((dir) => dir && showLastDir(dir)).catch(() => {});
+  // showDirectoryPicker は /Applications や ~/Library などシステム扱いの場所を開けないので、従来の方法も残す
+  $('legacyHint').hidden = false;
 }
+
+$('legacyButton').addEventListener('click', () => $('dirInput').click());
 
 $('lastButton').addEventListener('click', openLastDir);
 $('dirButton').addEventListener('click', openFolder);
@@ -271,7 +284,7 @@ document.addEventListener('drop', async (e) => {
   // フォルダを1つだけドロップした場合は、ハンドルとして開いて「前回のフォルダ」にする
   if (handles.length === 1 && handles[0]) {
     const h = await handles[0].catch(() => null);
-    if (h?.kind === 'directory') { await openDirHandle(h); return; }
+    if (h?.kind === 'directory' && (await openDirHandle(h, { quiet: true }))) return;
   }
   const out = [];
   if (entries.length) {
