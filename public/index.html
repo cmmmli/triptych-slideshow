@@ -4,8 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!-- 画像はローカルで読むだけなので、外部への通信と外部リソースの読み込みを一切禁止する -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
-<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'self'; worker-src 'self'">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#000000">
 <title>Triptych Slideshow</title>
 <style>
   :root { color-scheme: dark; }
@@ -245,6 +248,21 @@ if (supportsHandles) {
 }
 
 $('legacyButton').addEventListener('click', () => $('dirInput').click());
+
+// ---------- PWA ----------
+
+// file:// では使えないので失敗は無視する
+navigator.serviceWorker?.register('/sw.js').catch(() => {});
+
+// インストールしたアプリで、Finder の「このアプリケーションで開く」から渡された画像を表示する
+window.launchQueue?.setConsumer(async ({ files: handles }) => {
+  if (!handles?.length) return;
+  const out = [];
+  for (const h of handles) {
+    if (h.kind === 'file') out.push({ file: await h.getFile(), name: h.name });
+  }
+  setFiles(out);
+});
 
 $('lastButton').addEventListener('click', openLastDir);
 $('dirButton').addEventListener('click', openFolder);
