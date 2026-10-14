@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- 画像はローカルで読むだけなので、外部への通信と外部リソースの読み込みを一切禁止する -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<link rel="icon" href="data:,">
 <title>Triptych Slideshow</title>
 <style>
   :root { color-scheme: dark; }
@@ -98,7 +101,8 @@
     <tr><td><kbd>I</kbd></td><td>ファイル名表示</td></tr>
     <tr><td><kbd>F</kbd></td><td>フルスクリーン</td></tr>
     <tr><td><kbd>O</kbd></td><td>別のフォルダを開く</td></tr>
-    <tr><td><kbd>H</kbd> <kbd>Esc</kbd></td><td>このヘルプ</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>最初の画面に戻る</td></tr>
+    <tr><td><kbd>H</kbd></td><td>このヘルプ</td></tr>
   </table>
 </div>
 
@@ -224,12 +228,13 @@ function probe(i) {
 async function pick(exclude) {
   const wantPortrait = settings.mode === 3 && settings.portraitOnly;
   for (let t = 0; t < 60; t++) {
+    if (!files.length) return -1; // 読み込み中に最初の画面へ戻った
     const i = draw(exclude);
     const f = await probe(i);
     if (f.bad) continue;
     if (!wantPortrait || f.h > f.w) return i;
   }
-  return draw(exclude); // 縦長画像が見つからない場合は妥協する
+  return files.length ? draw(exclude) : -1; // 縦長画像が見つからない場合は妥協する
 }
 
 // ---------- 表示 ----------
@@ -286,10 +291,12 @@ async function showIn(slot, i) {
 }
 
 function applyState(state) {
+  if (state.length !== slots.length || state.some((i) => !files[i])) return; // 途中で戻った・読み直した
   return Promise.all(slots.map((s, k) => (s.cur !== state[k] ? showIn(s, state[k]) : null)));
 }
 
 function pushHistory(state) {
+  if (state.length !== slots.length || state.some((i) => !files[i])) return;
   history = history.slice(0, histPos + 1);
   history.push(state);
   if (history.length > HISTORY_LIMIT) history.shift();
@@ -367,10 +374,25 @@ document.addEventListener('mousemove', () => {
   idleTimer = setTimeout(() => document.body.classList.add('idle'), 2000);
 });
 
+function backToStart() {
+  if (!files.length) return;
+  clearTimeout(timer);
+  for (const s of slots) s.token++; // 読み込み中の画像を捨てる
+  for (const f of files) URL.revokeObjectURL(f.url);
+  files = [];
+  bag = [];
+  slots = [];
+  history = [];
+  histPos = -1;
+  stage.innerHTML = '';
+  $('start').classList.remove('hidden');
+}
+
 function setMode(m) {
   if (settings.mode === m) return;
   settings.mode = m;
   saveSettings();
+  if (!files.length) { toast(m === 3 ? '3枚横並び' : '1枚表示'); return; }
   const keep = slots.map((s) => s.cur);
   // 1枚 → 3枚 のときは今の画像を中央に置く
   rebuild(m === 3 && keep.length === 1 ? [undefined, keep[0], undefined] : keep);
@@ -442,7 +464,11 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'o': case 'O': $('dirInput').click(); break;
     case 'h': case 'H': case '?': help.classList.toggle('show'); break;
-    case 'Escape': help.classList.remove('show'); break;
+    case 'Escape':
+      // フルスクリーン中の Esc はブラウザが解除に使うので、ここには届かない
+      if (help.classList.contains('show')) help.classList.remove('show');
+      else backToStart();
+      break;
   }
 });
 $('help').addEventListener('click', () => $('help').classList.remove('show'));
