@@ -40,8 +40,13 @@
   }
 
   #stage { position: fixed; inset: 0; display: flex; }
-  #stage.gap { gap: 4px; }
-  .slot { position: relative; flex: 1 1 0; min-width: 0; overflow: hidden; cursor: pointer; }
+  .slot {
+    position: relative; flex: 1 1 0; min-width: 0; overflow: hidden; cursor: pointer;
+    transition: flex-grow .6s ease;
+  }
+  /* 幅 0 の枠にも隙間が付かないよう、gap ではなく枠線で隙間を作る */
+  #stage.gap .slot { border: 0 solid #000; border-width: 0 2px; }
+  .slot.empty { border-width: 0 !important; cursor: default; }
   .slot img {
     position: absolute; inset: 0; width: 100%; height: 100%;
     object-fit: contain; opacity: 0; transition: opacity .6s ease;
@@ -106,7 +111,7 @@
     <tr><td><kbd>C</kbd></td><td>入れ替え方：1枚ずつ順番 → 1枚ずつランダム → 全部</td></tr>
     <tr><td><kbd>S</kbd></td><td>シャッフル ON / OFF</td></tr>
     <tr><td><kbd>Z</kbd></td><td>全体表示 / 埋める（トリミング）</td></tr>
-    <tr><td><kbd>P</kbd></td><td>3枚モードで縦長画像のみ ON / OFF</td></tr>
+    <tr><td><kbd>P</kbd></td><td>3枚モードで縦長画像のみ ON / OFF（OFF なら横長も混ぜて並べる）</td></tr>
     <tr><td><kbd>+</kbd> <kbd>-</kbd></td><td>表示間隔を変更</td></tr>
     <tr><td><kbd>G</kbd></td><td>枠の隙間 ON / OFF</td></tr>
     <tr><td><kbd>I</kbd></td><td>ファイル名表示</td></tr>
@@ -351,16 +356,86 @@ function probe(i) {
   });
 }
 
-async function pick(exclude) {
+// accept を渡すと、それに合う画像だけを返す（見つからなければ null）。
+// 合わなかった画像は bag に戻して、次の回で優先的に出す。
+async function pick(exclude, accept) {
   const wantPortrait = settings.mode === 3 && settings.portraitOnly;
-  for (let t = 0; t < 60; t++) {
-    if (!files.length) return -1; // 読み込み中に最初の画面へ戻った
-    const i = draw(exclude);
-    const f = await probe(i);
-    if (f.bad) continue;
-    if (!wantPortrait || f.h > f.w) return i;
+  const rejected = [];
+  try {
+    for (let t = 0; t < 60; t++) {
+      if (!files.length) return -1; // 読み込み中に最初の画面へ戻った
+      const i = draw(exclude);
+      const f = await probe(i);
+      if (f.bad) continue;
+      if (wantPortrait && f.h <= f.w) continue;
+      if (accept && !accept(f)) {
+        rejected.push(i);
+        if (rejected.length >= 15) return null;
+        continue;
+      }
+      return i;
+    }
+    if (accept) return null;
+    return files.length ? draw(exclude) : -1; // 縦長画像が見つからない場合は妥協する
+  } finally {
+    if (files.length) bag.push(...rejected.reverse());
   }
-  return files.length ? draw(exclude) : -1; // 縦長画像が見つからない場合は妥協する
+}
+
+// ---------- 横長も混ぜた並べ方（3枚モードで「縦長画像のみ」が OFF のとき） ----------
+// 画面の高さを 1 としたときの各画像の幅（= 横 / 縦）を「幅の予算」として、
+// 画面の幅に収まるまで最大3枚を横に並べる。各枠の幅は画像の比率に合わせる。
+
+const FIT = 1.3;      // 予算をここまで超えても並べる（はみ出した分は少し縮む）。16:10 で 2:3 の縦長3枚が入る値
+const MIN_ROOM = 0.4; // 残りの幅がこれ未満なら、もう足さない
+
+const isImage = (i) => Number.isInteger(i) && i >= 0;
+const isMixed = () => settings.mode === 3 && !settings.portraitOnly;
+const ratio = (i) => (files[i].w && files[i].h ? files[i].w / files[i].h : 1);
+const budget = () => (stage.clientWidth / stage.clientHeight || 16 / 10) * FIT;
+
+// 枠の数に合わせて null（空の枠）で埋める
+const toState = (row) => [...row, ...Array(Math.max(0, slots.length - row.length)).fill(null)];
+
+async function buildRow(exclude) {
+  const ex = new Set(exclude);
+  const first = await pick(ex);
+  if (!isImage(first)) return toState([first]);
+  const row = [first];
+  ex.add(first);
+  let sum = ratio(first);
+  while (row.length < slots.length && budget() - sum >= MIN_ROOM) {
+    const room = budget() - sum;
+    const i = await pick(ex, (f) => f.w / f.h <= room);
+    if (!isImage(i)) break;
+    row.push(i);
+    ex.add(i);
+    sum += ratio(i);
+  }
+  return toState(row);
+}
+
+// 枠 k だけ入れ替えた state を返す
+async function replaceIn(state, k, exclude) {
+  const next = state.slice();
+  if (!isMixed()) {
+    next[k] = await pick(exclude);
+    return next;
+  }
+  // 空いた幅の 6 割以上を埋める画像を探し、なければ並びごと入れ替える
+  const others = next.reduce((s, i, j) => (j !== k && isImage(i) ? s + ratio(i) : s), 0);
+  const room = budget() - others;
+  const i = await pick(exclude, (f) => f.w / f.h <= room && f.w / f.h >= room * 0.6);
+  if (i === null) return buildRow(exclude);
+  next[k] = i;
+  // まだ幅に余裕があり空いている枠があれば、もう1枚足す
+  const empty = next.indexOf(null);
+  const left = room - ratio(i);
+  if (empty >= 0 && left >= MIN_ROOM) {
+    const j = await pick(new Set([...exclude, i]), (f) => f.w / f.h <= left);
+    if (isImage(j)) next[empty] = j;
+  }
+  return next;
 }
 
 // ---------- 表示 ----------
@@ -375,7 +450,7 @@ function rebuild(keep) {
     const cap = document.createElement('div');
     cap.className = 'cap';
     el.append(...imgs, cap);
-    const slot = { el, imgs, front: 0, cur: -1, token: 0, cap };
+    const slot = { el, imgs, front: 0, cur: undefined, token: 0, cap };
     el.addEventListener('click', () => replaceSlot(k));
     stage.append(el);
     slots.push(slot);
@@ -384,12 +459,17 @@ function rebuild(keep) {
   history = [];
   histPos = -1;
   (async () => {
-    const state = [];
-    const exclude = new Set();
-    for (let k = 0; k < slots.length; k++) {
-      const i = keep[k] !== undefined && keep[k] >= 0 ? keep[k] : await pick(exclude);
-      state.push(i);
-      exclude.add(i);
+    let state;
+    if (isMixed()) {
+      state = await buildRow(new Set());
+    } else {
+      state = [];
+      const exclude = new Set();
+      for (let k = 0; k < slots.length; k++) {
+        const i = isImage(keep[k]) ? keep[k] : await pick(exclude);
+        state.push(i);
+        exclude.add(i);
+      }
     }
     pushHistory(state);
     await applyState(state);
@@ -403,26 +483,49 @@ function applyClasses() {
   stage.classList.toggle('info', settings.info);
 }
 
-async function showIn(slot, i) {
+// 画像の読み込み（decode）だけ先に済ませ、切り替えは全部の枠で同時に行う関数を返す
+async function prepare(slot, i) {
+  if (slot.cur === i) return null;
   const token = ++slot.token;
+  if (i === null) {
+    return () => {
+      for (const img of slot.imgs) img.classList.remove('show');
+      slot.el.classList.add('empty');
+      slot.cur = null;
+    };
+  }
   const back = slot.imgs[1 - slot.front];
   back.src = files[i].url;
   try { await back.decode(); } catch {}
-  if (token !== slot.token) return;
-  back.classList.add('show');
-  slot.imgs[slot.front].classList.remove('show');
-  slot.front = 1 - slot.front;
-  slot.cur = i;
-  slot.cap.textContent = files[i].name;
+  if (token !== slot.token) return null;
+  return () => {
+    back.classList.add('show');
+    slot.imgs[slot.front].classList.remove('show');
+    slot.front = 1 - slot.front;
+    slot.cur = i;
+    slot.cap.textContent = files[i].name;
+    slot.el.classList.remove('empty');
+  };
 }
 
-function applyState(state) {
-  if (state.length !== slots.length || state.some((i) => !files[i])) return; // 途中で戻った・読み直した
-  return Promise.all(slots.map((s, k) => (s.cur !== state[k] ? showIn(s, state[k]) : null)));
+// 途中で最初の画面に戻った・読み直した場合の古い state を弾く
+const validState = (state) =>
+  state.length === slots.length && state.some(isImage) && state.every((i) => i === null || files[i]);
+
+async function applyState(state) {
+  if (!validState(state)) return;
+  const commits = await Promise.all(slots.map((s, k) => prepare(s, state[k])));
+  if (!validState(state)) return;
+  for (const commit of commits) commit?.();
+  // 各枠の幅：混ぜて並べるときは画像の比率、それ以外は均等
+  slots.forEach((s, k) => {
+    const i = state[k];
+    s.el.style.flexGrow = i === null ? 0 : isMixed() ? ratio(i) : 1;
+  });
 }
 
 function pushHistory(state) {
-  if (state.length !== slots.length || state.some((i) => !files[i])) return;
+  if (!validState(state)) return;
   history = history.slice(0, histPos + 1);
   history.push(state);
   if (history.length > HISTORY_LIMIT) history.shift();
@@ -442,18 +545,26 @@ async function step(dir) {
       await applyState(history[++histPos]);
       return;
     }
-    const cur = history[histPos] || slots.map((s) => s.cur);
-    const next = cur.slice();
-    const n = slots.length;
-    let targets;
-    if (n === 1 || settings.change === 'all') targets = [...Array(n).keys()];
-    else if (settings.change === 'seq') { targets = [seqSlot % n]; seqSlot = (seqSlot + 1) % n; }
-    else targets = [Math.floor(Math.random() * n)];
-    const exclude = new Set(cur);
-    for (const t of targets) {
-      const i = await pick(exclude);
-      next[t] = i;
-      exclude.add(i);
+    const cur = history[histPos] || slots.map((s) => s.cur ?? null);
+    const exclude = new Set(cur.filter(isImage));
+    const active = cur.flatMap((i, k) => (isImage(i) ? [k] : []));
+    let next;
+    if (slots.length === 1 || settings.change === 'all' || !active.length) {
+      if (isMixed()) {
+        next = await buildRow(exclude);
+      } else {
+        next = [];
+        for (let k = 0; k < slots.length; k++) {
+          const i = await pick(exclude);
+          next.push(i);
+          exclude.add(i);
+        }
+      }
+    } else {
+      let k;
+      if (settings.change === 'seq') { k = active[seqSlot % active.length]; seqSlot++; }
+      else k = active[Math.floor(Math.random() * active.length)];
+      next = await replaceIn(cur, k, exclude);
     }
     pushHistory(next);
     await applyState(next);
@@ -464,12 +575,13 @@ async function step(dir) {
 
 async function replaceSlot(k) {
   if (busy || histPos < 0) return;
+  const cur = history[histPos];
+  if (!isImage(cur[k])) return;
   busy = true;
   try {
-    const cur = history[histPos].slice();
-    cur[k] = await pick(new Set(cur));
-    pushHistory(cur);
-    await applyState(cur);
+    const next = await replaceIn(cur, k, new Set(cur.filter(isImage)));
+    pushHistory(next);
+    await applyState(next);
   } finally {
     busy = false;
   }
@@ -519,7 +631,7 @@ function setMode(m) {
   settings.mode = m;
   saveSettings();
   if (!files.length) { toast(m === 3 ? '3枚横並び' : '1枚表示'); return; }
-  const keep = slots.map((s) => s.cur);
+  const keep = slots.map((s) => s.cur).filter(isImage);
   // 1枚 → 3枚 のときは今の画像を中央に置く
   rebuild(m === 3 && keep.length === 1 ? [undefined, keep[0], undefined] : keep);
   toast(m === 3 ? '3枚横並び' : '1枚表示');
@@ -570,7 +682,8 @@ document.addEventListener('keydown', (e) => {
     case 'p': case 'P':
       settings.portraitOnly = !settings.portraitOnly;
       saveSettings();
-      toast(`縦長画像のみ ${settings.portraitOnly ? 'ON' : 'OFF'}`);
+      toast(settings.portraitOnly ? '縦長画像のみ ON' : '縦長画像のみ OFF（横長も混ぜて並べる）');
+      if (files.length && settings.mode === 3) rebuild([]); // 並び方が変わるので組み直す
       break;
     case 'g': case 'G':
       settings.gap = !settings.gap;
