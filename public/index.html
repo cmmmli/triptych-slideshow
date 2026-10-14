@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<!-- 画像はローカルで読むだけなので、外部への通信と外部リソースの読み込みを一切禁止する -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'self'; worker-src 'self'">
+<!-- 外部への通信を禁止する。例外は、自分で入力した https の画像 URL を <img> で読み込むことだけ -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: 'self' https:; connect-src 'none'; base-uri 'none'; form-action 'none'; manifest-src 'self'; worker-src 'self'">
+<!-- 外部の画像を読み込む時に、このページの URL を相手に送らない（直リンク禁止のサイトでも表示されやすくなる） -->
+<meta name="referrer" content="no-referrer">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -34,6 +36,16 @@
   }
   .btn.secondary { background: #333; }
   .hint { font-size: 13px; }
+  #urlBox { width: min(640px, 100%); color: #aaa; font-size: 14px; }
+  #urlBox summary { cursor: pointer; }
+  #urlBox[open] { display: flex; flex-direction: column; gap: 8px; }
+  #urlBox[open] summary { margin-bottom: 4px; }
+  #urlInput {
+    box-sizing: border-box; width: 100%; resize: vertical; padding: 8px;
+    background: #111; color: #eee; border: 1px solid #444; border-radius: 6px;
+    font: 13px/1.5 ui-monospace, monospace; white-space: pre; overflow-wrap: normal;
+  }
+  #urlButton { align-self: flex-end; }
   .link {
     padding: 0 2px; border: none; background: none; cursor: pointer;
     color: #8ab4ff; font: inherit; text-decoration: underline;
@@ -93,6 +105,12 @@
   </p>
   <input type="file" id="dirInput" webkitdirectory multiple hidden>
   <input type="file" id="fileInput" accept="image/*" multiple hidden>
+  <details id="urlBox">
+    <summary>画像の URL から再生</summary>
+    <textarea id="urlInput" rows="6" spellcheck="false"
+      placeholder="https://example.com/a.jpg&#10;https://example.com/b.png&#10;（1行に1つ。# で始まる行は無視）"></textarea>
+    <button type="button" class="btn" id="urlButton">URL で再生</button>
+  </details>
   <p class="hint"><kbd>H</kbd> でキー操作一覧</p>
 </div>
 <div id="stage"></div>
@@ -148,12 +166,17 @@ let busy = false;
 
 // ---------- 画像の読み込み ----------
 
-// list: { file: File, name: 表示用のパス }[]
+// ローカルファイルから作った blob: URL だけ解放する（外部の URL はそのまま）
+function releaseFiles() {
+  for (const f of files) if (f.url.startsWith('blob:')) URL.revokeObjectURL(f.url);
+}
+
+// list: { file: File, name: 表示用のパス }[] または { url: 外部の画像 URL, name }[]
 function setFiles(list) {
-  const images = list.filter(({ file }) => file.type.startsWith('image/') || IMG_RE.test(file.name));
+  const images = list.filter(({ file }) => !file || file.type.startsWith('image/') || IMG_RE.test(file.name));
   if (!images.length) { toast('画像が見つかりませんでした'); return false; }
-  for (const f of files) URL.revokeObjectURL(f.url);
-  files = images.map(({ file, name }) => ({ name, url: URL.createObjectURL(file) }));
+  releaseFiles();
+  files = images.map(({ file, url, name }) => ({ name, url: file ? URL.createObjectURL(file) : url }));
   bag = [];
   seqSlot = 0;
   $('start').classList.add('hidden');
@@ -248,6 +271,34 @@ if (supportsHandles) {
 }
 
 $('legacyButton').addEventListener('click', () => $('dirInput').click());
+
+// ---------- 外部の画像 URL ----------
+
+try { $('urlInput').value = localStorage.getItem('triptych-urls') || ''; } catch {}
+if ($('urlInput').value.trim()) $('urlBox').open = true;
+
+$('urlInput').addEventListener('input', () => {
+  try { localStorage.setItem('triptych-urls', $('urlInput').value); } catch {}
+});
+
+$('urlButton').addEventListener('click', () => {
+  const list = [];
+  let skipped = 0;
+  for (const line of $('urlInput').value.split('\n')) {
+    const s = line.trim();
+    if (!s || s.startsWith('#')) continue;
+    let url;
+    try { url = new URL(s); } catch { skipped++; continue; }
+    // http は https のページから読み込めないので https のみ
+    if (url.protocol !== 'https:') { skipped++; continue; }
+    const last = url.pathname.split('/').pop() || url.hostname;
+    let name;
+    try { name = decodeURIComponent(last); } catch { name = last; }
+    list.push({ url: url.href, name });
+  }
+  if (!list.length) { toast('https の画像 URL が見つかりませんでした'); return; }
+  if (setFiles(list) && skipped) toast(`${list.length} 件を読み込みました（${skipped} 行はスキップ）`);
+});
 
 // ---------- PWA ----------
 
@@ -504,7 +555,7 @@ function backToStart() {
   if (!files.length) return;
   clearTimeout(timer);
   for (const s of slots) s.token++; // 読み込み中の画像を捨てる
-  for (const f of files) URL.revokeObjectURL(f.url);
+  releaseFiles();
   files = [];
   bag = [];
   slots = [];
@@ -536,6 +587,7 @@ function changeInterval(d) {
 
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.closest?.('textarea, input')) return; // URL の入力中はショートカットを無効にする
   const help = $('help');
   switch (e.key) {
     case ' ':
