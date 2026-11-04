@@ -1,0 +1,14 @@
+pre-commit:
+  jobs:
+    # ステージしたファイルだけを整形・修正し、直した分をステージし直す
+    - name: lint
+      glob: '*.{html,js}'
+      run: pnpm exec eslint --fix {staged_files}
+      stage_fixed: true
+    - name: format
+      run: pnpm exec prettier --ignore-unknown --write {staged_files}
+      stage_fixed: true
+    - name: typecheck
+      run: pnpm typecheck
+    - name: test
+      run: pnpm test
