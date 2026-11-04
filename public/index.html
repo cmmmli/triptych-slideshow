@@ -194,6 +194,35 @@
         opacity: 0.45;
       }
 
+      /* 編集モード：選択中の画像に枠を付け、右上にモードと操作を出す */
+      body.editing .slot.selected::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        box-shadow: inset 0 0 0 3px #4c8dff;
+        pointer-events: none;
+      }
+      #modeLabel {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 1;
+        display: none;
+        padding: 4px 10px;
+        border-radius: 6px;
+        background: rgba(20, 20, 20, 0.8);
+        color: #ccc;
+        font-size: 12px;
+        pointer-events: none;
+      }
+      #modeLabel b {
+        color: #8ab4ff;
+        font-weight: 600;
+      }
+      body.editing #modeLabel {
+        display: block;
+      }
+
       body.idle,
       body.idle .slot {
         cursor: none;
@@ -237,6 +266,11 @@
       }
       #help td {
         padding: 4px 12px;
+      }
+      #help th {
+        padding: 16px 12px 4px;
+        color: #8ab4ff;
+        font-weight: 600;
       }
       #help td:first-child {
         text-align: right;
@@ -352,6 +386,7 @@
       <p class="hint"><kbd>H</kbd> でキー操作一覧</p>
     </div>
     <div id="stage"></div>
+    <div id="modeLabel"><b>編集モード</b>　←→ 選択 ・ D 削除候補 ・ Space 次へ ・ E 終了</div>
     <div id="toast"></div>
     <div id="help">
       <table>
@@ -404,8 +439,8 @@
           <td>フルスクリーン</td>
         </tr>
         <tr>
-          <td><kbd>D</kbd></td>
-          <td>マウスを乗せている画像を削除候補にする / 解除</td>
+          <td><kbd>E</kbd></td>
+          <td>編集モード（画像の選別）に入る / 出る</td>
         </tr>
         <tr>
           <td><kbd>X</kbd></td>
@@ -422,6 +457,29 @@
         <tr>
           <td><kbd>H</kbd></td>
           <td>このヘルプ</td>
+        </tr>
+        <tr>
+          <th colspan="2">編集モード中（スライドは止まる）</th>
+        </tr>
+        <tr>
+          <td><kbd>→</kbd> <kbd>←</kbd></td>
+          <td>選択する画像を移動（1枚表示では次へ / 前へ）</td>
+        </tr>
+        <tr>
+          <td>マウス</td>
+          <td>乗せた画像を選択</td>
+        </tr>
+        <tr>
+          <td><kbd>Space</kbd> <kbd>Shift</kbd>+<kbd>Space</kbd></td>
+          <td>次の並び / 前の並び</td>
+        </tr>
+        <tr>
+          <td><kbd>D</kbd></td>
+          <td>選択中の画像を削除候補にする / 解除</td>
+        </tr>
+        <tr>
+          <td><kbd>E</kbd> <kbd>Esc</kbd></td>
+          <td>編集モードを終える</td>
         </tr>
       </table>
     </div>
@@ -473,7 +531,8 @@
       let timer = null;
       let seqSlot = 0;
       let busy = false;
-      let hoverSlot = -1; // マウスが乗っている枠（D キーの対象）
+      let editing = false; // 編集モード中か
+      let selSlot = -1; // 編集モードで選択中の枠
 
       // ---------- 画像の読み込み ----------
 
@@ -856,7 +915,7 @@
       function rebuild(keep) {
         stage.innerHTML = '';
         slots = [];
-        hoverSlot = -1;
+        selSlot = -1;
         for (let k = 0; k < settings.mode; k++) {
           const el = document.createElement('div');
           el.className = 'slot';
@@ -868,12 +927,10 @@
           badge.textContent = '削除候補';
           el.append(...imgs, cap, badge);
           const slot = { el, imgs, front: 0, cur: undefined, token: 0, cap };
-          el.addEventListener('click', () => replaceSlot(k));
-          el.addEventListener('mouseenter', () => {
-            hoverSlot = k;
-          });
-          el.addEventListener('mouseleave', () => {
-            if (hoverSlot === k) hoverSlot = -1;
+          // 編集モード中はクリックやマウスを乗せると選択し、画像は入れ替えない
+          el.addEventListener('click', () => (editing ? select(k) : replaceSlot(k)));
+          el.addEventListener('mousemove', () => {
+            if (editing && selSlot !== k) select(k);
           });
           stage.append(el);
           slots.push(slot);
@@ -945,6 +1002,7 @@
         if (!validState(state)) return;
         for (const commit of commits) commit?.();
         updateBadges();
+        select(selSlot); // 選択中の枠が空になったら近くの画像に移す
         // 各枠の幅：混ぜて並べるときは画像の比率、それ以外は均等
         slots.forEach((s, k) => {
           const i = state[k];
@@ -960,7 +1018,8 @@
         histPos = hist.length - 1;
       }
 
-      async function step(dir) {
+      // whole: 入れ替え方の設定に関係なく、並び全体を入れ替える（編集モードの「次の並び」）
+      async function step(dir, { whole = false } = {}) {
         if (busy || !slots.length) return;
         busy = true;
         try {
@@ -977,7 +1036,7 @@
           const exclude = new Set(cur.filter(isImage));
           const active = cur.flatMap((i, k) => (isImage(i) ? [k] : []));
           let next;
-          if (slots.length === 1 || settings.change === 'all' || !active.length) {
+          if (slots.length === 1 || whole || settings.change === 'all' || !active.length) {
             if (isMixed()) {
               next = await buildRow(exclude);
             } else {
@@ -1020,15 +1079,53 @@
 
       function schedule() {
         clearTimeout(timer);
-        if (!playing || !files.length) return;
+        if (!playing || editing || !files.length) return;
         timer = setTimeout(async () => {
           await step(1);
           schedule();
         }, settings.interval * 1000);
       }
 
+      // ---------- 編集モード ----------
+      // 画像を選別するためのモード。スライドを止め、選択中の画像に枠を出して D などで操作する。
+
+      // 画像が表示されている枠の番号
+      const activeSlots = () => slots.flatMap((s, k) => (isImage(s.cur) ? [k] : []));
+
+      // 枠 k を選択する。k に画像がなければ、いちばん近い画像の枠を選ぶ
+      function select(k) {
+        if (editing) {
+          const act = activeSlots();
+          if (!act.includes(k) && act.length) {
+            const from = k < 0 ? 0 : k;
+            k = act.reduce((best, j) => (Math.abs(j - from) < Math.abs(best - from) ? j : best));
+          }
+          selSlot = act.includes(k) ? k : -1;
+        }
+        slots.forEach((s, j) => s.el.classList.toggle('selected', editing && j === selSlot));
+      }
+
+      // ← → ：選択を左右に動かす。枠が1つしかなければ前へ / 次へ
+      function moveSelection(d) {
+        const act = activeSlots();
+        if (act.length <= 1) {
+          step(d);
+          return;
+        }
+        const pos = Math.min(act.length - 1, Math.max(0, act.indexOf(selSlot) + d));
+        select(act[pos]);
+      }
+
+      function setEditing(on) {
+        if (editing === on) return;
+        editing = on;
+        document.body.classList.toggle('editing', on);
+        select(on ? selSlot : -1);
+        schedule(); // 編集モード中は止まり、終えると元の再生状態に戻る
+      }
+
       // ---------- 削除 ----------
-      // D で削除候補に印を付け、X の一覧でまとめて削除する。
+      // 編集モードの D で削除候補に印を付け、X の一覧でまとめて削除する。
       // 削除できるのはフォルダのハンドルから読み込んだ画像だけ（ファイル選択・従来の方法・URL では不可）
 
       const marked = () => files.filter((f) => f.marked && !f.removed);
@@ -1037,21 +1134,14 @@
         for (const s of slots) s.el.classList.toggle('marked', isImage(s.cur) && !!files[s.cur]?.marked);
       }
 
-      // 1枚表示や画像が1枚だけのときはその画像、それ以外はマウスが乗っている枠の画像
-      function markTarget() {
-        const shown = slots.map((s) => s.cur).filter(isImage);
-        if (shown.length === 1) return shown[0];
-        const s = slots[hoverSlot];
-        return s && isImage(s.cur) ? s.cur : -1;
-      }
-
       function toggleMark() {
         if (!files.length) return;
-        const i = markTarget();
-        if (i < 0) {
-          toast('削除候補にする画像にマウスを乗せてください');
+        if (!editing) {
+          toast('E で編集モードに入ると、削除候補を選べます');
           return;
         }
+        const i = slots[selSlot]?.cur;
+        if (!isImage(i)) return;
         const f = files[i];
         if (!f.del) {
           toast('この読み込み方では削除できません（「フォルダを選択」で開いてください）');
@@ -1094,7 +1184,7 @@
       function openTrash() {
         if (!files.length) return;
         if (!marked().length) {
-          toast('削除候補はありません（D で追加）');
+          toast('削除候補はありません（編集モードの D で追加）');
           return;
         }
         $('help').classList.remove('show');
@@ -1190,6 +1280,7 @@
 
       function backToStart() {
         if (!files.length) return;
+        setEditing(false);
         clearTimeout(timer);
         for (const s of slots) s.token++; // 読み込み中の画像を捨てる
         releaseFiles();
@@ -1236,15 +1327,26 @@
         switch (e.key) {
           case ' ':
             e.preventDefault();
+            if (editing) {
+              step(e.shiftKey ? -1 : 1, { whole: true });
+              break;
+            }
             playing = !playing;
             schedule();
             toast(playing ? '▶ 再生' : '⏸ 一時停止');
             break;
           case 'ArrowRight':
-            step(1).then(schedule);
+          case 'ArrowLeft': {
+            const d = e.key === 'ArrowRight' ? 1 : -1;
+            if (editing) moveSelection(d);
+            else step(d).then(schedule);
             break;
-          case 'ArrowLeft':
-            step(-1).then(schedule);
+          }
+          case 'e':
+          case 'E':
+            if (!files.length) break;
+            setEditing(!editing);
+            toast(editing ? '編集モード' : '編集モードを終了');
             break;
           case '1':
             setMode(1);
@@ -1326,7 +1428,10 @@
           case 'Escape':
             // フルスクリーン中の Esc はブラウザが解除に使うので、ここには届かない
             if (help.classList.contains('show')) help.classList.remove('show');
-            else if (confirmLeave()) backToStart();
+            else if (editing) {
+              setEditing(false);
+              toast('編集モードを終了');
+            } else if (confirmLeave()) backToStart();
             break;
         }
       });
