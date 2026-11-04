@@ -71,6 +71,12 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #stage.info .cap { display: block; }
+  .badge {
+    position: absolute; top: 8px; left: 8px; display: none;
+    padding: 2px 8px; border-radius: 4px; background: #d33; color: #fff; font-size: 12px;
+  }
+  .slot.marked .badge { display: block; }
+  .slot.marked img.show { opacity: .45; }
 
   body.idle, body.idle .slot { cursor: none; }
 
@@ -90,6 +96,27 @@
   #help table { border-collapse: collapse; font-size: 14px; }
   #help td { padding: 4px 12px; }
   #help td:first-child { text-align: right; }
+  #trash {
+    position: fixed; inset: 0; z-index: 2; display: none; flex-direction: column; gap: 12px;
+    background: rgba(0,0,0,.9); padding: 24px 16px; box-sizing: border-box;
+  }
+  #trash.show { display: flex; }
+  #trash h2 { margin: 0; font-size: 18px; font-weight: 600; }
+  #trash p { margin: 0; color: #aaa; font-size: 13px; }
+  #trashList {
+    flex: 1; overflow-y: auto; display: grid; gap: 8px; align-content: start;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .thumb {
+    display: flex; flex-direction: column; gap: 4px; padding: 4px; cursor: pointer;
+    background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: inherit; font: inherit;
+  }
+  .thumb:hover { border-color: #888; }
+  .thumb img { width: 100%; height: 160px; object-fit: contain; }
+  .thumb span { font-size: 11px; color: #aaa; overflow-wrap: anywhere; text-align: left; }
+  #trash .buttons { justify-content: flex-end; }
+  .btn.danger { background: #d33; }
+  .btn:disabled { opacity: .5; cursor: default; }
   kbd {
     display: inline-block; min-width: 1.4em; padding: 1px 6px; border-radius: 4px;
     background: #333; border: 1px solid #555; font-family: ui-monospace, monospace; text-align: center;
@@ -134,10 +161,21 @@
     <tr><td><kbd>G</kbd></td><td>枠の隙間 ON / OFF</td></tr>
     <tr><td><kbd>I</kbd></td><td>ファイル名表示</td></tr>
     <tr><td><kbd>F</kbd></td><td>フルスクリーン</td></tr>
+    <tr><td><kbd>D</kbd></td><td>マウスを乗せている画像を削除候補にする / 解除</td></tr>
+    <tr><td><kbd>X</kbd></td><td>削除候補を確認して削除</td></tr>
     <tr><td><kbd>O</kbd></td><td>別のフォルダを開く</td></tr>
     <tr><td><kbd>Esc</kbd></td><td>最初の画面に戻る</td></tr>
     <tr><td><kbd>H</kbd></td><td>このヘルプ</td></tr>
   </table>
+</div>
+<div id="trash">
+  <h2>削除候補 <span id="trashCount"></span> 枚</h2>
+  <p>ゴミ箱には入らず、完全に削除されます。クリックすると候補から外します。</p>
+  <div id="trashList"></div>
+  <div class="buttons">
+    <button type="button" class="btn secondary" id="trashClose">閉じる</button>
+    <button type="button" class="btn danger" id="trashDelete">削除する</button>
+  </div>
 </div>
 
 <script>
@@ -159,7 +197,7 @@ function saveSettings() {
 const $ = (id) => document.getElementById(id);
 const stage = $('stage');
 
-let files = [];       // { name, url, w, h, bad }
+let files = [];       // { name, url, w, h, bad, del, marked }
 let bag = [];         // 次に出す候補（末尾から pop）
 let slots = [];       // { el, imgs, front, cur, token, cap }
 let history = [];     // 各スロットの画像 index の配列
@@ -168,6 +206,7 @@ let playing = true;
 let timer = null;
 let seqSlot = 0;
 let busy = false;
+let hoverSlot = -1;   // マウスが乗っている枠（D キーの対象）
 
 // ---------- 画像の読み込み ----------
 
@@ -176,12 +215,13 @@ function releaseFiles() {
   for (const f of files) if (f.url.startsWith('blob:')) URL.revokeObjectURL(f.url);
 }
 
-// list: { file: File, name: 表示用のパス }[] または { url: 外部の画像 URL, name }[]
+// list: { file: File, name: 表示用のパス, del? }[] または { url: 外部の画像 URL, name }[]
+// del はフォルダのハンドルから読んだときだけ付く削除用の情報 { root, parent, entry }
 function setFiles(list) {
   const images = list.filter(({ file }) => !file || file.type.startsWith('image/') || IMG_RE.test(file.name));
   if (!images.length) { toast('画像が見つかりませんでした'); return false; }
   releaseFiles();
-  files = images.map(({ file, url, name }) => ({ name, url: file ? URL.createObjectURL(file) : url }));
+  files = images.map(({ file, url, name, del }) => ({ name, url: file ? URL.createObjectURL(file) : url, del }));
   bag = [];
   seqSlot = 0;
   $('start').classList.add('hidden');
@@ -218,12 +258,14 @@ function showLastDir(dir) {
   $('dirButton').classList.add('secondary');
 }
 
-async function readDirHandle(dir, prefix, out) {
+async function readDirHandle(root, dir, prefix, out) {
   for await (const h of dir.values()) {
     if (h.name.startsWith('.')) continue;
     const path = `${prefix}/${h.name}`;
-    if (h.kind === 'directory') await readDirHandle(h, path, out);
-    else if (IMG_RE.test(h.name)) out.push({ file: await h.getFile(), name: path });
+    if (h.kind === 'directory') await readDirHandle(root, h, path, out);
+    else if (IMG_RE.test(h.name)) {
+      out.push({ file: await h.getFile(), name: path, del: { root, parent: dir, entry: h.name } });
+    }
   }
 }
 
@@ -231,7 +273,7 @@ async function readDirHandle(dir, prefix, out) {
 async function openDirHandle(dir, { quiet = false } = {}) {
   const out = [];
   try {
-    await readDirHandle(dir, dir.name, out);
+    await readDirHandle(dir, dir, dir.name, out);
   } catch {
     if (!quiet) toast('フォルダを読み込めませんでした（移動・削除された可能性があります）');
     return false;
@@ -384,16 +426,20 @@ function refillBag() {
   bag = idx;
 }
 
+// 削除候補・削除済みの画像は次から出さない
+const usableFile = (f) => !f.bad && !f.marked && !f.removed;
+
 function draw(exclude) {
-  const usable = files.filter((f) => !f.bad).length;
+  const usable = files.filter(usableFile).length;
   for (let t = 0; t < files.length * 2 + 2; t++) {
     if (!bag.length) refillBag();
     const i = bag.pop();
-    if (files[i].bad) continue;
+    if (!usableFile(files[i])) continue;
     if (exclude.has(i) && usable > exclude.size) { bag.unshift(i); continue; }
     return i;
   }
-  return Math.floor(Math.random() * files.length);
+  const rest = files.flatMap((f, i) => (f.removed ? [] : [i]));
+  return rest[Math.floor(Math.random() * rest.length)];
 }
 
 function probe(i) {
@@ -494,15 +540,21 @@ async function replaceIn(state, k, exclude) {
 function rebuild(keep) {
   stage.innerHTML = '';
   slots = [];
+  hoverSlot = -1;
   for (let k = 0; k < settings.mode; k++) {
     const el = document.createElement('div');
     el.className = 'slot';
     const imgs = [new Image(), new Image()];
     const cap = document.createElement('div');
     cap.className = 'cap';
-    el.append(...imgs, cap);
+    const badge = document.createElement('div');
+    badge.className = 'badge';
+    badge.textContent = '削除候補';
+    el.append(...imgs, cap, badge);
     const slot = { el, imgs, front: 0, cur: undefined, token: 0, cap };
     el.addEventListener('click', () => replaceSlot(k));
+    el.addEventListener('mouseenter', () => { hoverSlot = k; });
+    el.addEventListener('mouseleave', () => { if (hoverSlot === k) hoverSlot = -1; });
     stage.append(el);
     slots.push(slot);
   }
@@ -561,13 +613,15 @@ async function prepare(slot, i) {
 
 // 途中で最初の画面に戻った・読み直した場合の古い state を弾く
 const validState = (state) =>
-  state.length === slots.length && state.some(isImage) && state.every((i) => i === null || files[i]);
+  state.length === slots.length && state.some(isImage) &&
+  state.every((i) => i === null || (files[i] && !files[i].removed));
 
 async function applyState(state) {
   if (!validState(state)) return;
   const commits = await Promise.all(slots.map((s, k) => prepare(s, state[k])));
   if (!validState(state)) return;
   for (const commit of commits) commit?.();
+  updateBadges();
   // 各枠の幅：混ぜて並べるときは画像の比率、それ以外は均等
   slots.forEach((s, k) => {
     const i = state[k];
@@ -645,6 +699,130 @@ function schedule() {
   timer = setTimeout(async () => { await step(1); schedule(); }, settings.interval * 1000);
 }
 
+// ---------- 削除 ----------
+// D で削除候補に印を付け、X の一覧でまとめて削除する。
+// 削除できるのはフォルダのハンドルから読み込んだ画像だけ（ファイル選択・従来の方法・URL では不可）
+
+const marked = () => files.filter((f) => f.marked && !f.removed);
+
+function updateBadges() {
+  for (const s of slots) s.el.classList.toggle('marked', isImage(s.cur) && !!files[s.cur]?.marked);
+}
+
+// 1枚表示や画像が1枚だけのときはその画像、それ以外はマウスが乗っている枠の画像
+function markTarget() {
+  const shown = slots.map((s) => s.cur).filter(isImage);
+  if (shown.length === 1) return shown[0];
+  const s = slots[hoverSlot];
+  return s && isImage(s.cur) ? s.cur : -1;
+}
+
+function toggleMark() {
+  if (!files.length) return;
+  const i = markTarget();
+  if (i < 0) { toast('削除候補にする画像にマウスを乗せてください'); return; }
+  const f = files[i];
+  if (!f.del) { toast('この読み込み方では削除できません（「フォルダを選択」で開いてください）'); return; }
+  f.marked = !f.marked;
+  updateBadges();
+  const n = marked().length;
+  toast(f.marked ? `削除候補に追加（${n} 枚、X で確認）` : `削除候補から外しました（${n} 枚）`);
+}
+
+const trashOpen = () => $('trash').classList.contains('show');
+
+function renderTrash() {
+  const list = marked();
+  $('trashCount').textContent = list.length;
+  $('trashDelete').disabled = !list.length;
+  $('trashDelete').textContent = `${list.length} 枚を削除する`;
+  const box = $('trashList');
+  box.innerHTML = '';
+  for (const f of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'thumb';
+    b.title = 'クリックで候補から外す';
+    const img = new Image();
+    img.src = f.url;
+    const name = document.createElement('span');
+    name.textContent = f.name;
+    b.append(img, name);
+    b.addEventListener('click', () => { f.marked = false; updateBadges(); renderTrash(); });
+    box.append(b);
+  }
+}
+
+function openTrash() {
+  if (!files.length) return;
+  if (!marked().length) { toast('削除候補はありません（D で追加）'); return; }
+  $('help').classList.remove('show');
+  clearTimeout(timer); // 確認中はスライドを止める
+  renderTrash();
+  $('trash').classList.add('show');
+}
+
+function closeTrash() {
+  $('trash').classList.remove('show');
+  schedule();
+}
+
+async function deleteMarked() {
+  const list = marked();
+  if (!list.length) return;
+  // 読み込み時は読み取りだけ許可されているので、ここで初めて書き込みの許可を求める
+  for (const root of new Set(list.map((f) => f.del.root))) {
+    let perm;
+    try {
+      perm = await root.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') perm = await root.requestPermission({ mode: 'readwrite' });
+    } catch {
+      perm = 'denied';
+    }
+    if (perm !== 'granted') { toast('フォルダへの書き込みが許可されませんでした'); return; }
+  }
+  $('trashDelete').disabled = true;
+  let ok = 0;
+  for (const f of list) {
+    try {
+      await f.del.parent.removeEntry(f.del.entry);
+      f.removed = true;
+      f.marked = false;
+      ok++;
+    } catch {}
+  }
+  const failed = list.length - ok;
+  closeTrash();
+  afterRemoval();
+  toast(failed ? `${ok} 枚を削除、${failed} 枚は削除できませんでした` : `${ok} 枚を削除しました`);
+}
+
+// 削除した画像を表示と履歴から外す
+function afterRemoval() {
+  if (!files.some((f) => !f.removed)) { backToStart(); return; }
+  for (const f of files) if (f.removed && f.url.startsWith('blob:')) URL.revokeObjectURL(f.url);
+  if (!slots.some((s) => isImage(s.cur) && files[s.cur].removed)) {
+    const cur = history[histPos];
+    history = history.filter((st) => st.every((i) => !isImage(i) || !files[i].removed));
+    histPos = Math.max(0, history.indexOf(cur));
+    return;
+  }
+  rebuild(slots.map((s) => (isImage(s.cur) && !files[s.cur].removed ? s.cur : undefined)));
+}
+
+// 削除候補があるときに別のフォルダへ移ると候補が消えるので、1回目は警告だけにする
+let leaveWarnedAt = 0;
+function confirmLeave() {
+  const n = marked().length;
+  if (!n || Date.now() - leaveWarnedAt < 3000) return true;
+  leaveWarnedAt = Date.now();
+  toast(`削除候補が ${n} 枚あります（もう一度押すと候補を捨てて移動）`);
+  return false;
+}
+
+$('trashClose').addEventListener('click', closeTrash);
+$('trashDelete').addEventListener('click', deleteMarked);
+
 // ---------- UI ----------
 
 let toastTimer;
@@ -700,6 +878,10 @@ function changeInterval(d) {
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.target.closest?.('textarea, input')) return; // URL の入力中はショートカットを無効にする
+  if (trashOpen()) {
+    if (e.key === 'Escape' || e.key === 'x' || e.key === 'X') closeTrash();
+    return;
+  }
   const help = $('help');
   switch (e.key) {
     case ' ':
@@ -753,12 +935,14 @@ document.addEventListener('keydown', (e) => {
       if (document.fullscreenElement) document.exitFullscreen();
       else document.documentElement.requestFullscreen?.();
       break;
-    case 'o': case 'O': openFolder(); break;
+    case 'd': case 'D': toggleMark(); break;
+    case 'x': case 'X': openTrash(); break;
+    case 'o': case 'O': if (confirmLeave()) openFolder(); break;
     case 'h': case 'H': case '?': help.classList.toggle('show'); break;
     case 'Escape':
       // フルスクリーン中の Esc はブラウザが解除に使うので、ここには届かない
       if (help.classList.contains('show')) help.classList.remove('show');
-      else backToStart();
+      else if (confirmLeave()) backToStart();
       break;
   }
 });
