@@ -13,7 +13,11 @@
 pnpm install
 pnpm dev     # ローカルで起動
 pnpm test    # Playwright のテスト（初回は pnpm exec playwright install chromium）
+pnpm lint    # ESLint（index.html の <script> も対象）
+pnpm format  # Prettier で整形
 pnpm deploy  # Cloudflare Workers にデプロイ
 ```
+
+コミット時に lefthook が lint・整形・型チェック・テストを実行する（`pnpm install` でフックが入る）。
 
 ページ本体は `public/index.html` の1ファイルのみ。
