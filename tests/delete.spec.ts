@@ -106,6 +106,8 @@ test('「ファイルを選択」で開いた画像は削除できない', async
   await expect(page.locator('.slot img.show')).toHaveCount(1);
 
   await page.keyboard.press('d');
-  await expect(page.locator('#toast')).toHaveText('この読み込み方では削除できません（「フォルダを選択」で開いてください）');
+  await expect(page.locator('#toast')).toHaveText(
+    'この読み込み方では削除できません（「フォルダを選択」で開いてください）',
+  );
   await expect(page.locator('.slot.marked')).toHaveCount(0);
 });

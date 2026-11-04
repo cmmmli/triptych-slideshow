@@ -4,6 +4,13 @@ import { expect, type Page } from '@playwright/test';
 // そこで showDirectoryPicker を差し替え、ブラウザ内のストレージ（OPFS）に作ったフォルダを返す。
 // OPFS のハンドルは実際のフォルダと同じ API で動き、許可は最初から付いている。
 
+// TypeScript の DOM の型にはまだ入っていない
+declare global {
+  interface Window {
+    showDirectoryPicker: () => Promise<FileSystemDirectoryHandle>;
+  }
+}
+
 // テスト用フォルダに置く画像。w / h を省略すると縦長（400x600）
 export type FixtureImage = { path: string; w?: number; h?: number };
 
@@ -16,7 +23,10 @@ export type SetupOptions = {
   denyWrite?: boolean; // 書き込みの許可ダイアログで「許可しない」を選んだ状態にする
 };
 
-export async function setup(page: Page, { images = portraits(8), settings = {}, denyWrite = false }: SetupOptions = {}) {
+export async function setup(
+  page: Page,
+  { images = portraits(8), settings = {}, denyWrite = false }: SetupOptions = {},
+) {
   await page.addInitScript(
     ({ images, settings, denyWrite }) => {
       // 既定では自動で次の画像に進まないよう、表示間隔を長くしておく
@@ -75,13 +85,15 @@ export const slot = (page: Page, k: number) => page.locator('.slot').nth(k);
 
 // 各枠に表示中の画像のパス（"photos/" は除く）。空の枠は null
 export function shown(page: Page) {
-  return page.locator('.slot').evaluateAll((els) =>
-    els.map((el) =>
-      el.classList.contains('empty') || !el.querySelector('img.show')
-        ? null
-        : el.querySelector('.cap')!.textContent!.replace(/^photos\//, ''),
-    ),
-  );
+  return page
+    .locator('.slot')
+    .evaluateAll((els) =>
+      els.map((el) =>
+        el.classList.contains('empty') || !el.querySelector('img.show')
+          ? null
+          : el.querySelector('.cap')!.textContent!.replace(/^photos\//, ''),
+      ),
+    );
 }
 
 // 画面の切り替え（画像の decode）が終わって、表示が落ち着くまで待つ
