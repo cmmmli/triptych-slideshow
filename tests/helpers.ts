@@ -8,6 +8,7 @@ import { expect, type Page } from '@playwright/test';
 declare global {
   interface Window {
     showDirectoryPicker: () => Promise<FileSystemDirectoryHandle>;
+    putImage: (path: string, n: number, w?: number, h?: number) => Promise<void>;
   }
 }
 
@@ -32,23 +33,26 @@ export async function setup(
       // 既定では自動で次の画像に進まないよう、表示間隔を長くしておく
       localStorage.setItem('triptych-settings', JSON.stringify({ interval: 120, ...settings }));
 
+      // テスト用フォルダ（photos）に画像を書き込む。n で色を変える
+      window.putImage = async (path, n, w = 400, h = 600) => {
+        const parts = path.split('/');
+        let parent = await (await navigator.storage.getDirectory()).getDirectoryHandle('photos', { create: true });
+        for (const p of parts.slice(0, -1)) parent = await parent.getDirectoryHandle(p, { create: true });
+        const canvas = new OffscreenCanvas(w, h);
+        const g = canvas.getContext('2d')!;
+        g.fillStyle = `hsl(${n * 47} 60% 45%)`;
+        g.fillRect(0, 0, w, h);
+        const blob = await canvas.convertToBlob({ type: 'image/png' });
+        const file = await (await parent.getFileHandle(parts.at(-1)!, { create: true })).createWritable();
+        await file.write(blob);
+        await file.close();
+      };
+
       window.showDirectoryPicker = async () => {
         const root = await navigator.storage.getDirectory();
         await root.removeEntry('photos', { recursive: true }).catch(() => {});
         const dir = await root.getDirectoryHandle('photos', { create: true });
-        for (const [n, { path, w = 400, h = 600 }] of images.entries()) {
-          const parts = path.split('/');
-          let parent = dir;
-          for (const p of parts.slice(0, -1)) parent = await parent.getDirectoryHandle(p, { create: true });
-          const canvas = new OffscreenCanvas(w, h);
-          const g = canvas.getContext('2d')!;
-          g.fillStyle = `hsl(${n * 47} 60% 45%)`;
-          g.fillRect(0, 0, w, h);
-          const blob = await canvas.convertToBlob({ type: 'image/png' });
-          const file = await (await parent.getFileHandle(parts.at(-1)!, { create: true })).createWritable();
-          await file.write(blob);
-          await file.close();
-        }
+        for (const [n, { path, w, h }] of images.entries()) await window.putImage(path, n, w, h);
         if (denyWrite) {
           Object.assign(dir, {
             queryPermission: async () => 'prompt',
@@ -64,6 +68,21 @@ export async function setup(
   await page.getByRole('button', { name: 'フォルダを選択' }).click();
   await expect(page.locator('#toast')).toHaveText(`${images.length} 枚の画像を読み込みました`);
   await expect(page.locator('.slot img.show').first()).toBeVisible();
+}
+
+// 開いた後のテスト用フォルダに画像を足す（外から追加された状態を作る）
+export function addImages(page: Page, paths: string[]) {
+  return page.evaluate(async (paths) => {
+    for (const [n, path] of paths.entries()) await window.putImage(path, 100 + n);
+  }, paths);
+}
+
+// 開いた後のテスト用フォルダからファイルを消す（外から削除された状態を作る）
+export function removeFiles(page: Page, paths: string[]) {
+  return page.evaluate(async (paths) => {
+    const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('photos');
+    for (const path of paths) await dir.removeEntry(path);
+  }, paths);
 }
 
 // テスト用フォルダに残っているファイル（"sub/c.png" の形）

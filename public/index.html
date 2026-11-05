@@ -447,6 +447,10 @@
           <td>削除候補を確認して削除</td>
         </tr>
         <tr>
+          <td><kbd>R</kbd></td>
+          <td>フォルダを読み直す（増えた画像を加える。一巡するごとにも自動で読み直す）</td>
+        </tr>
+        <tr>
           <td><kbd>O</kbd></td>
           <td>別のフォルダを開く</td>
         </tr>
@@ -533,6 +537,9 @@
       let busy = false;
       let editing = false; // 編集モード中か
       let selSlot = -1; // 編集モードで選択中の枠
+      let curDir = null; // 表示中のフォルダのハンドル（読み直しに使う）。フォルダ以外から読んだときは null
+      let refills = 0; // bag を詰め直した回数（2回目以降、つまり一巡したらフォルダを読み直す）
+      let rescanning = false;
 
       // ---------- 画像の読み込み ----------
 
@@ -541,16 +548,28 @@
         for (const f of files) if (f.url.startsWith('blob:')) URL.revokeObjectURL(f.url);
       }
 
+      // mod / size は読み直したときに中身が変わったかを見るため
+      const toEntry = ({ file, url, name, del }) => ({
+        name,
+        url: file ? URL.createObjectURL(file) : url,
+        del,
+        mod: file?.lastModified,
+        size: file?.size,
+      });
+
       // list: { file: File, name: 表示用のパス, del? }[] または { url: 外部の画像 URL, name }[]
       // del はフォルダのハンドルから読んだときだけ付く削除用の情報 { root, parent, entry }
-      function setFiles(list) {
+      // dir はフォルダのハンドルから読んだときだけ渡す（読み直しに使う）
+      function setFiles(list, dir = null) {
         const images = list.filter(({ file }) => !file || file.type.startsWith('image/') || IMG_RE.test(file.name));
         if (!images.length) {
           toast('画像が見つかりませんでした');
           return false;
         }
         releaseFiles();
-        files = images.map(({ file, url, name, del }) => ({ name, url: file ? URL.createObjectURL(file) : url, del }));
+        files = images.map(toEntry);
+        curDir = dir;
+        refills = 0;
         bag = [];
         seqSlot = 0;
         $('start').classList.add('hidden');
@@ -613,10 +632,61 @@
           if (!quiet) toast('フォルダを読み込めませんでした（移動・削除された可能性があります）');
           return false;
         }
-        if (!setFiles(out)) return true;
+        if (!setFiles(out, dir)) return true;
         showLastDir(dir);
         idb('readwrite', (s) => s.put(dir, 'lastDir')).catch(() => {});
         return true;
+      }
+
+      // 開いているフォルダを読み直し、増えた画像を足して、なくなった画像を外す。
+      // 履歴は files の index で持っているので、並べ替えずに末尾へ足す
+      async function rescan({ manual = false } = {}) {
+        const dir = curDir;
+        if (!dir) {
+          if (manual && files.length) toast('読み直せるのは「フォルダを選択」で開いたときだけです');
+          return;
+        }
+        if (rescanning) return;
+        rescanning = true;
+        const out = [];
+        try {
+          await readDirHandle(dir, dir, dir.name, out);
+        } catch {
+          if (manual) toast('フォルダを読み直せませんでした');
+          return;
+        } finally {
+          rescanning = false;
+        }
+        if (curDir !== dir) return; // 読み直している間に最初の画面に戻った・別のフォルダを開いた
+
+        const known = new Map(files.flatMap((f, i) => (f.removed ? [] : [[f.name, i]])));
+        const added = [];
+        for (const entry of out) {
+          const i = known.get(entry.name);
+          if (i === undefined) {
+            added.push(files.push(toEntry(entry)) - 1);
+            continue;
+          }
+          known.delete(entry.name);
+          const f = files[i];
+          if (f.mod === entry.file.lastModified && f.size === entry.file.size) continue;
+          // 書き換えられた画像は、古い File からは読めなくなるので作り直す
+          URL.revokeObjectURL(f.url);
+          Object.assign(f, toEntry(entry), { w: undefined, h: undefined, bad: false });
+        }
+        for (const i of known.values()) {
+          files[i].removed = true;
+          files[i].marked = false;
+        }
+
+        // 増えた画像は次に出す
+        bag.push(...(settings.shuffle ? shuffle(added) : added.reverse()));
+        if (known.size) afterRemoval();
+        const parts = [];
+        if (added.length) parts.push(`${added.length} 枚追加`);
+        if (known.size) parts.push(`${known.size} 枚なくなった`);
+        if (parts.length) toast(`フォルダを読み直しました（${parts.join('、')}）`);
+        else if (manual) toast('フォルダに変更はありません');
       }
 
       async function openFolder() {
@@ -778,17 +848,19 @@
 
       // ---------- 画像の選び方 ----------
 
+      function shuffle(a) {
+        for (let i = a.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+      }
+
       function refillBag() {
         const idx = files.map((_, i) => i);
-        if (settings.shuffle) {
-          for (let i = idx.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [idx[i], idx[j]] = [idx[j], idx[i]];
-          }
-        } else {
-          idx.reverse();
-        }
-        bag = idx;
+        bag = settings.shuffle ? shuffle(idx) : idx.reverse();
+        // 一巡したら、フォルダに増えた・なくなった画像がないか読み直す（終わるのは待たない）
+        if (refills++ > 0) rescan();
       }
 
       // 削除候補・削除済みの画像は次から出さない
@@ -1285,6 +1357,7 @@
         for (const s of slots) s.token++; // 読み込み中の画像を捨てる
         releaseFiles();
         files = [];
+        curDir = null;
         bag = [];
         slots = [];
         hist = [];
@@ -1415,6 +1488,10 @@
           case 'x':
           case 'X':
             openTrash();
+            break;
+          case 'r':
+          case 'R':
+            rescan({ manual: true });
             break;
           case 'o':
           case 'O':
