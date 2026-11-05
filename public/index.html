@@ -436,7 +436,7 @@
         </tr>
         <tr>
           <td><kbd>F</kbd></td>
-          <td>フルスクリーン</td>
+          <td>フルスクリーン（Esc でも解除）</td>
         </tr>
         <tr>
           <td><kbd>E</kbd></td>
@@ -456,7 +456,7 @@
         </tr>
         <tr>
           <td><kbd>Esc</kbd></td>
-          <td>最初の画面に戻る</td>
+          <td>最初の画面に戻る（フルスクリーン中は、まずフルスクリーンを解除）</td>
         </tr>
         <tr>
           <td><kbd>H</kbd></td>
@@ -858,9 +858,33 @@
 
       function refillBag() {
         const idx = files.map((_, i) => i);
-        bag = settings.shuffle ? shuffle(idx) : idx.reverse();
+        bag = settings.shuffle ? shuffleAfterRecent(idx) : idx.reverse();
         // 一巡したら、フォルダに増えた・なくなった画像がないか読み直す（終わるのは待たない）
         if (refills++ > 0) rescan();
+      }
+
+      // 一巡して詰め直したとき、直前に見た画像がすぐまた出ないよう、bag の底（最後に出る側）に回す
+      function shuffleAfterRecent(idx) {
+        const recent = new Set();
+        const want = Math.floor(files.length / 3);
+        for (let h = hist.length - 1; h >= 0 && recent.size < want; h--) {
+          for (const i of hist[h]) if (isImage(i)) recent.add(i);
+        }
+        shuffle(idx);
+        return [...idx.filter((i) => recent.has(i)), ...idx.filter((i) => !recent.has(i))];
+      }
+
+      // 条件に合わず飛ばした画像を bag に戻す。
+      // シャッフル中はランダムな位置に戻す（上に積むと、飛ばされた画像ばかり続けて出て偏る）
+      function putBack(list) {
+        if (!settings.shuffle) {
+          bag.push(...list.reverse());
+          return;
+        }
+        for (const i of list) {
+          if (bag.includes(i)) continue; // 探している途中で詰め直していた
+          bag.splice(Math.floor(Math.random() * (bag.length + 1)), 0, i);
+        }
       }
 
       // 削除候補・削除済みの画像は次から出さない
@@ -901,7 +925,7 @@
       }
 
       // accept を渡すと、それに合う画像だけを返す（見つからなければ null）。
-      // 合わなかった画像は bag に戻して、次の回で優先的に出す。
+      // 合わなかった画像は bag に戻す（putBack）。
       async function pick(exclude, accept) {
         const wantPortrait = settings.mode === 3 && settings.portraitOnly;
         const rejected = [];
@@ -922,7 +946,7 @@
           if (accept) return null;
           return files.length ? draw(exclude) : -1; // 縦長画像が見つからない場合は妥協する
         } finally {
-          if (files.length) bag.push(...rejected.reverse());
+          if (files.length) putBack(rejected);
         }
       }
 
@@ -930,7 +954,9 @@
       // 画面の高さを 1 としたときの各画像の幅（= 横 / 縦）を「幅の予算」として、
       // 画面の幅に収まるまで最大3枚を横に並べる。各枠の幅は画像の比率に合わせる。
 
-      const FIT = 1.3; // 予算をここまで超えても並べる（はみ出した分は少し縮む）。16:10 で 2:3 の縦長3枚が入る値
+      // 予算をここまで超えても並べる（はみ出した分は少し縮む）。
+      // 16:10 の画面に 3:4 の縦長3枚、または 4:3 の横長と 3:4 の縦長が1枚ずつ入る値
+      const FIT = 1.45;
       const MIN_ROOM = 0.4; // 残りの幅がこれ未満なら、もう足さない
 
       const isImage = (i) => Number.isInteger(i) && i >= 0;
@@ -966,18 +992,21 @@
           next[k] = await pick(exclude);
           return next;
         }
-        // 空いた幅の 6 割以上を埋める画像を探し、なければ並びごと入れ替える
+        // 空いた幅に収まる画像を探す。他の枠はそのまま残し、どうしても入らないときだけ並びごと入れ替える
         const others = next.reduce((s, i, j) => (j !== k && isImage(i) ? s + ratio(i) : s), 0);
         const room = budget() - others;
-        const i = await pick(exclude, (f) => f.w / f.h <= room && f.w / f.h >= room * 0.6);
+        const i = await pick(exclude, (f) => f.w / f.h <= room);
         if (i === null) return buildRow(exclude);
         next[k] = i;
-        // まだ幅に余裕があり空いている枠があれば、もう1枚足す
-        const empty = next.indexOf(null);
-        const left = room - ratio(i);
-        if (empty >= 0 && left >= MIN_ROOM) {
-          const j = await pick(new Set([...exclude, i]), (f) => f.w / f.h <= left);
-          if (isImage(j)) next[empty] = j;
+        // まだ幅に余裕があり空いている枠があれば足す
+        const ex = new Set([...exclude, i]);
+        let left = room - ratio(i);
+        for (let e = next.indexOf(null); e >= 0 && left >= MIN_ROOM; e = next.indexOf(null)) {
+          const j = await pick(ex, (f) => f.w / f.h <= left);
+          if (!isImage(j)) break;
+          next[e] = j;
+          ex.add(j);
+          left -= ratio(j);
         }
         return next;
       }
@@ -1389,6 +1418,22 @@
         toast(`表示間隔 ${settings.interval} 秒`);
       }
 
+      // フルスクリーン中の Esc は普通はブラウザが解除に使い、ページに届かない。
+      // Keyboard Lock で Esc をページで受け取り、ヘルプなどを先に閉じられるようにする（Esc 長押しならブラウザ側で解除できる）
+      async function toggleFullscreen() {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+          return;
+        }
+        try {
+          await document.documentElement.requestFullscreen();
+          await navigator.keyboard?.lock?.(['Escape']);
+        } catch {}
+      }
+      document.addEventListener('fullscreenchange', () => {
+        if (!document.fullscreenElement) navigator.keyboard?.unlock?.();
+      });
+
       document.addEventListener('keydown', (e) => {
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.target.closest?.('textarea, input')) return; // URL の入力中はショートカットを無効にする
@@ -1478,8 +1523,7 @@
             break;
           case 'f':
           case 'F':
-            if (document.fullscreenElement) document.exitFullscreen();
-            else document.documentElement.requestFullscreen?.();
+            toggleFullscreen();
             break;
           case 'd':
           case 'D':
@@ -1503,12 +1547,13 @@
             help.classList.toggle('show');
             break;
           case 'Escape':
-            // フルスクリーン中の Esc はブラウザが解除に使うので、ここには届かない
+            // 開いているものから順に閉じる。フルスクリーン中の Esc は toggleFullscreen でここに届くようにしている
             if (help.classList.contains('show')) help.classList.remove('show');
             else if (editing) {
               setEditing(false);
               toast('編集モードを終了');
-            } else if (confirmLeave()) backToStart();
+            } else if (document.fullscreenElement) document.exitFullscreen();
+            else if (confirmLeave()) backToStart();
             break;
         }
       });
