@@ -56,6 +56,18 @@ test.describe('次へ・前へ', () => {
     expect(await changedFrom(page, s0)).toEqual(s1);
   });
 
+  test('シャッフルでは一巡するまで同じ画像は出ず、直前に見た画像は次の巡の初めに出ない', async ({ page }) => {
+    await setup(page, { images: portraits(9), settings: { mode: 1 } });
+    const seen = [(await settle(page))[0]];
+    for (let n = 0; n < 14; n++) {
+      await page.keyboard.press('ArrowRight');
+      seen.push((await changedFrom(page, [seen.at(-1)!]))[0]);
+    }
+    expect(new Set(seen.slice(0, 9)).size).toBe(9);
+    // 一巡の最後の3枚は、次の巡では後ろに回る
+    for (const name of seen.slice(6, 9)) expect(seen.slice(9, 15)).not.toContain(name);
+  });
+
   test('最初の並びで ← を押すと、履歴がないと表示される', async ({ page }) => {
     await setup(page);
     await page.keyboard.press('ArrowLeft');
@@ -161,6 +173,26 @@ test.describe('表示モード', () => {
     await expect(page.locator('.slot.empty')).toHaveCount(2);
   });
 
+  test('横長も混ぜて並べるときも、→ で入れ替わるのは1枚ずつ', async ({ page }) => {
+    // 16:10 の画面に、スマホの写真によくある 3:4 の縦長と 4:3 の横長を混ぜる
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const images = [
+      ...Array.from({ length: 10 }, (_, i) => ({ path: `p${i}.png`, w: 300, h: 400 })),
+      ...Array.from({ length: 10 }, (_, i) => ({ path: `l${i}.png`, w: 400, h: 300 })),
+    ];
+    await setup(page, { images, settings: { portraitOnly: false } });
+    let prev = await settle(page);
+    for (let n = 0; n < 15; n++) {
+      // この比率なら常に2枚以上並ぶ（1枚だけになるのは、並び全体を作り直してしまっていたときの症状）
+      expect(prev.filter(Boolean).length).toBeGreaterThanOrEqual(2);
+      await page.keyboard.press('ArrowRight');
+      const cur = await changedFrom(page, prev);
+      // 表示されていた画像のうち、入れ替わったのは1枚だけ（空いた枠に足されるのは構わない）
+      expect(cur.filter((name, k) => prev[k] !== null && name !== prev[k])).toHaveLength(1);
+      prev = cur;
+    }
+  });
+
   test('Z / G / I で見た目の設定を切り替える', async ({ page }) => {
     await setup(page);
     const stage = page.locator('#stage');
@@ -181,6 +213,33 @@ test.describe('表示モード', () => {
     await expect(page.locator('#help')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.locator('#help')).toBeHidden();
+    await expect(page.locator('#start')).toBeHidden();
+  });
+
+  test('フルスクリーン中の Esc は、ヘルプを閉じてからフルスクリーンを解除する', async ({ page }) => {
+    await setup(page);
+    const isFullscreen = () => page.evaluate(() => !!document.fullscreenElement);
+    // 本物のブラウザは Esc を先に取ってフルスクリーンを解除してしまう（テストでは起きない）。
+    // それを防ぐ Keyboard Lock を呼んでいるかを確かめる
+    await page.evaluate(() => {
+      const w = window as unknown as { lockedKeys?: string[] };
+      const kb = (navigator as unknown as { keyboard: object }).keyboard;
+      Object.assign(kb, { lock: async (keys: string[]) => void (w.lockedKeys = keys) });
+    });
+    await page.keyboard.press('f');
+    await expect.poll(isFullscreen).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { lockedKeys?: string[] }).lockedKeys))
+      .toEqual(['Escape']);
+    await page.keyboard.press('?');
+    await expect(page.locator('#help')).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#help')).toBeHidden();
+    expect(await isFullscreen()).toBe(true);
+
+    await page.keyboard.press('Escape');
+    await expect.poll(isFullscreen).toBe(false);
     await expect(page.locator('#start')).toBeHidden();
   });
 });
