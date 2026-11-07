@@ -1,5 +1,5 @@
-import { test, expect, type Page } from '@playwright/test';
-import { setup, portraits, slot, shown, settle } from './helpers';
+import { type Page } from '@playwright/test';
+import { test, expect, setup, portraits, slot, shown, settle } from './helpers';
 
 const toast = (page: Page) => page.locator('#toast');
 

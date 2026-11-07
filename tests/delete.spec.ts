@@ -1,5 +1,4 @@
-import { test, expect } from '@playwright/test';
-import { setup, filesOnDisk, slot, shown } from './helpers';
+import { test, expect, setup, filesOnDisk, slot, shown, tinyPortraitPng as png } from './helpers';
 
 const FIXTURE = ['a.png', 'b.png', 'sub/c.png', 'sub/d.png'];
 const images = FIXTURE.map((path) => ({ path }));
@@ -100,10 +99,6 @@ test('削除候補があるときの Esc は、1回目は警告だけ', async ({
 
 test('「ファイルを選択」で開いた画像は削除できない', async ({ page }) => {
   await page.goto('/');
-  const png = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAACCAYAAACZgbYnAAAAEElEQVR4nGNgYGD4z8DAAAAEAAH6Lc3/AAAAAElFTkSuQmCC',
-    'base64',
-  ); // 1x2 の縦長 PNG
   await page.locator('#fileInput').setInputFiles([
     { name: 'x.png', mimeType: 'image/png', buffer: png },
     { name: 'y.png', mimeType: 'image/png', buffer: png },

@@ -1,5 +1,15 @@
-import { test, expect, type Page } from '@playwright/test';
-import { setup, portraits, shown, settle, addImages, removeFiles } from './helpers';
+import { type Page } from '@playwright/test';
+import {
+  test,
+  expect,
+  setup,
+  portraits,
+  shown,
+  settle,
+  addImages,
+  removeFiles,
+  tinyPortraitPng as png,
+} from './helpers';
 
 const toast = (page: Page) => page.locator('#toast');
 
@@ -59,10 +69,6 @@ test('全部を一巡すると、自動でフォルダを読み直す', async ({
 
 test('「ファイルを選択」で開いたときは読み直せない', async ({ page }) => {
   await page.goto('/');
-  const png = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAACCAYAAACZgbYnAAAAEElEQVR4nGNgYGD4z8DAAAAEAAH6Lc3/AAAAAElFTkSuQmCC',
-    'base64',
-  ); // 1x2 の縦長 PNG
   await page.locator('#fileInput').setInputFiles([{ name: 'x.png', mimeType: 'image/png', buffer: png }]);
   await expect(page.locator('.slot img.show').first()).toBeVisible();
 
