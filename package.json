@@ -6,6 +6,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "playwright test",
+    "shot": "playwright test -c playwright.shots.config.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "tsc"

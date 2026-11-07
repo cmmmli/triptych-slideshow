@@ -75,6 +75,15 @@ export async function setup(
         const g = canvas.getContext('2d')!;
         g.fillStyle = `hsl(${n * 47} 60% 45%)`;
         g.fillRect(0, 0, w, h);
+        // スクリーンショットで、どの画像がどこに・どう切り抜かれて出ているか分かるよう、枠とファイル名を描く
+        g.strokeStyle = '#fff';
+        g.lineWidth = Math.min(w, h) / 40;
+        g.strokeRect(0, 0, w, h);
+        g.fillStyle = '#fff';
+        g.font = `bold ${Math.min(w, h) / 6}px sans-serif`;
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillText(parts.at(-1)!.replace(/\.png$/, ''), w / 2, h / 2);
         const blob = await canvas.convertToBlob({ type: 'image/png' });
         const file = await (await parent.getFileHandle(parts.at(-1)!, { create: true })).createWritable();
         await file.write(blob);
