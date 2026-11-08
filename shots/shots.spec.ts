@@ -1,5 +1,5 @@
-import { test, type Page } from '@playwright/test';
-import { setup, settle, type FixtureImage } from '../tests/helpers';
+import { test, setup, settle, type FixtureImage } from '../tests/helpers';
+import type { Page } from '@playwright/test';
 
 // 主な画面を screenshots/<名前>.png に保存する。画面を足したらここにも足す。
 // 画像は枠とファイル名入りの単色（tests/helpers.ts の putImage）。並びが毎回同じになるようシャッフルは切る
