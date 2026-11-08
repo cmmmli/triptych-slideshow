@@ -1,4 +1,37 @@
-import { expect, type Page } from '@playwright/test';
+import { test as base, expect, type Page } from '@playwright/test';
+
+export { expect };
+
+// すべてのテストで、ページの例外・console.error・CSP 違反が出たら失敗にする。
+// 検証していない箇所が壊れても気づけるようにするため。
+// わざとエラーを起こすテストは test.use({ allowedErrors: [/.../] }) で除外する
+export const test = base.extend<{ allowedErrors: RegExp[]; pageErrors: string[] }>({
+  allowedErrors: [[], { option: true }],
+  pageErrors: [
+    async ({ page, allowedErrors }, use) => {
+      const errors: string[] = [];
+      page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+      page.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`console.error: ${m.text()}`);
+      });
+      // CSP 違反は console に出ない場合もあるので、イベントでも拾う
+      await page.addInitScript(() => {
+        document.addEventListener('securitypolicyviolation', (e) =>
+          console.error(`CSP violation: ${e.violatedDirective} ${e.blockedURI}`),
+        );
+      });
+      await use(errors);
+      expect(errors.filter((e) => !allowedErrors.some((re) => re.test(e)))).toEqual([]);
+    },
+    { auto: true },
+  ],
+});
+
+// 1x2 の縦長 PNG
+export const tinyPortraitPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAACCAYAAACZgbYnAAAAEElEQVR4nGNgYGD4z8DAAAAEAAH6Lc3/AAAAAElFTkSuQmCC',
+  'base64',
+);
 
 // フォルダ選択ダイアログと書き込み許可のダイアログは OS の画面なので自動操作できない。
 // そこで showDirectoryPicker を差し替え、ブラウザ内のストレージ（OPFS）に作ったフォルダを返す。
