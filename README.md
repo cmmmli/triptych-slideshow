@@ -13,6 +13,7 @@
 pnpm install
 pnpm dev     # ローカルで起動
 pnpm test    # Playwright のテスト（初回は pnpm exec playwright install chromium）
+pnpm shot    # 主な画面のスクリーンショットを screenshots/ に保存
 pnpm lint    # ESLint（index.html の <script> も対象）
 pnpm format  # Prettier で整形
 pnpm deploy  # Cloudflare Workers にデプロイ
