@@ -1,4 +1,13 @@
 {
+  "permissions": {
+    "deny": [
+      "Bash(pnpm deploy*)",
+      "Bash(pnpm run deploy*)",
+      "Bash(wrangler deploy*)",
+      "Bash(pnpm exec wrangler deploy*)",
+      "Bash(npx wrangler deploy*)"
+    ]
+  },
   "hooks": {
     "Stop": [
       {
